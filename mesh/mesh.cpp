@@ -11830,6 +11830,7 @@ void Mesh::EnsureNCMesh(bool simplices_nonconforming)
    {
       if ((meshgen & 0x2) /* quads/hexes */ ||
           (meshgen & 0x4) /* wedges */ ||
+          (meshgen & 0x8) /* pyramids */ ||
           (simplices_nonconforming && (meshgen & 0x1)) /* simplices */)
       {
          ncmesh = new NCMesh(this);
