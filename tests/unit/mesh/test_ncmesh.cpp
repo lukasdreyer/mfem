@@ -247,6 +247,64 @@ TEST_CASE("NCMesh Pyramid Refinement Boundary", "[NCMesh]")
 
 #ifdef MFEM_USE_MPI
 
+// Test case: Verify that ranks agree on the orientation of shared edges after
+//            nonconforming refinement and rebalancing: for H1 elements of
+//            degree 3 (two DOFs per edge), ProjectBdrCoefficient, which
+//            combines the values of shared DOFs over the ranks, must give the
+//            same boundary values as the element-wise interpolation.
+TEST_CASE("ParNCMesh Shared Edge Orientation", "[Parallel], [NCMesh]")
+{
+   Mesh smesh("../../data/beam-hex.mesh", 1, 1);
+   for (int i = 0; i < 1; i++) { smesh.UniformRefinement(); }
+   smesh.EnsureNCMesh(true);
+   ParMesh pmesh(MPI_COMM_WORLD, smesh);
+   smesh.Clear();
+
+   FunctionCoefficient u([](const Vector &x)
+   {
+      return std::pow(1.0 + 0.3 * x(0) + 0.5 * x(1) + 0.7 * x(2), 3);
+   });
+
+   for (int cycle = 0; cycle < 3; cycle++)
+   {
+      // deterministic irregular refinement, independent of the partition
+      Array<int> refs;
+      Vector c(3);
+      for (int e = 0; e < pmesh.GetNE(); e++)
+      {
+         pmesh.GetElementCenter(e, c);
+         const real_t s = std::sin(12.9898 * c(0) + 78.233 * c(1) +
+                                   37.719 * c(2)) * 43758.5453;
+         if (s - std::floor(s) < 0.5) { refs.Append(e); }
+      }
+      pmesh.GeneralRefinement(refs, 1, 1);
+      pmesh.Rebalance();
+
+      H1_FECollection fec(3, 3);
+      ParFiniteElementSpace fes(&pmesh, &fec);
+
+      ParGridFunction interp(&fes), bdr(&fes);
+      interp.ProjectCoefficient(u);
+      Array<int> ess_bdr(pmesh.bdr_attributes.Max());
+      ess_bdr = 1;
+      bdr = 0.0;
+      bdr.ProjectBdrCoefficient(u, ess_bdr);
+
+      Array<int> ess_dofs;
+      fes.GetEssentialVDofs(ess_bdr, ess_dofs);
+      real_t diff = 0.0;
+      for (int i = 0; i < ess_dofs.Size(); i++)
+      {
+         if (ess_dofs[i]) { diff = std::max(diff, std::abs(bdr(i) - interp(i))); }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, &diff, 1, MPITypeMap<real_t>::mpi_type,
+                    MPI_MAX, MPI_COMM_WORLD);
+
+      CAPTURE(cycle, pmesh.GetGlobalNE());
+      REQUIRE(diff == MFEM_Approx(0.0));
+   }
+} // test case
+
 // Test case: Verify that rebalancing a ParMesh with refined pyramids transfers
 //            all children of the pyramids (ten, not eight): the number of
 //            elements and the volume are preserved, and the interpolation of a

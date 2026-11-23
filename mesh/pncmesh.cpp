@@ -997,8 +997,11 @@ void ParNCMesh::GetConformingSharedStructures(ParMesh &pmesh)
       int el_loc = entity_elem_local[1][pmesh.sedge_ledge[i]];
       MeshId edge_id(-1, leaf_elements[(el_loc >> 4)], (el_loc & 0xf));
 
-      int v[2];
-      GetEdgeVertices(edge_id, v, false);
+      // vertices in the local edge order of the element that represents the edge (the same on all ranks);
+      // node ids are local and may differ between ranks
+      const Element &el = elements[edge_id.element];
+      const int* ev = GI[el.Geom()].edges[(int) edge_id.local];
+      int v[2] = { nodes[el.node[ev[0]]].vert_index, nodes[el.node[ev[1]]].vert_index };
       pmesh.shared_edges[i] = new Segment(v, 1);
    }
 
