@@ -262,6 +262,61 @@ TEST_CASE("H1 Pyramid Finite Element",
    }
 }
 
+// Test case: Verify that the H1 pyramid elements order their face DoFs as the
+//            neighboring elements and the boundary elements do: interpolation
+//            of a polynomial of degree p on a mixed mesh is exact, and the
+//            projection onto the boundary DoFs gives the same values.
+TEST_CASE("H1 Pyramid Face DoF Consistency",
+          "[H1_BergotPyramidElement]"
+          "[H1_FuentesPyramidElement]"
+          "[FiniteElement]")
+{
+   auto mesh_fname = GENERATE("../../data/ref-pyramid.mesh",
+                              "../../data/fichera-mixed-16.mesh");
+   auto pyr_type = GENERATE(0, 1); // Bergot, Fuentes
+
+   Mesh mesh(mesh_fname, 1, 1);
+   if (mesh.GetNE() == 1)
+   {
+      mesh.UniformRefinement(); // pyramids and tetrahedra
+   }
+
+   for (int p = 1; p <= 4; p++)
+   {
+      H1_FECollection fec(p, 3, BasisType::GaussLobatto, pyr_type);
+      FiniteElementSpace fes(&mesh, &fec);
+
+      FunctionCoefficient u([p](const Vector &x)
+      {
+         return std::pow(1.0 + 0.3 * x(0) + 0.5 * x(1) + 0.7 * x(2), p);
+      });
+
+      GridFunction interp(&fes);
+      interp.ProjectCoefficient(u);
+
+      Array<int> ess_bdr(mesh.bdr_attributes.Max());
+      ess_bdr = 1;
+      Array<int> ess_dofs;
+      fes.GetEssentialVDofs(ess_bdr, ess_dofs);
+      GridFunction bdr(&fes);
+      bdr = 0.0;
+      bdr.ProjectBdrCoefficient(u, ess_bdr);
+
+      real_t bdr_diff = 0.0;
+      for (int i = 0; i < ess_dofs.Size(); i++)
+      {
+         if (ess_dofs[i])
+         {
+            bdr_diff = std::max(bdr_diff, std::abs(bdr(i) - interp(i)));
+         }
+      }
+
+      CAPTURE(mesh_fname, pyr_type, p);
+      REQUIRE(interp.ComputeL2Error(u) == MFEM_Approx(0.0));
+      REQUIRE(bdr_diff == MFEM_Approx(0.0));
+   }
+}
+
 TEST_CASE("Nedelec Segment Finite Element",
           "[ND_SegmentElement]"
           "[VectorFiniteElement]"

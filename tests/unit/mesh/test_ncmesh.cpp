@@ -183,7 +183,114 @@ TEST_CASE("NCMesh 3D Derefined Volume", "[NCMesh]")
 } // test case
 
 
+// Test case: Verify that nonconforming refinement of meshes with pyramids
+//            preserves the boundary: per boundary attribute, the boundary
+//            elements cover the same area as before the refinement, and every
+//            face with a single element is a boundary element.
+TEST_CASE("NCMesh Pyramid Refinement Boundary", "[NCMesh]")
+{
+   auto mesh_fname = GENERATE("../../data/ref-pyramid.mesh",
+                              "../../data/fichera-mixed-16.mesh");
+
+   Mesh mesh(mesh_fname, 1, 1);
+   mesh.EnsureNCMesh(true);
+   const int nattr = mesh.bdr_attributes.Max();
+
+   auto bdr_area = [nattr](Mesh &m)
+   {
+      Vector area(nattr);
+      area = 0.0;
+      for (int be = 0; be < m.GetNBE(); be++)
+      {
+         ElementTransformation *T = m.GetBdrElementTransformation(be);
+         const IntegrationRule &ir =
+            IntRules.Get(m.GetBdrElementGeometry(be), 2);
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            T->SetIntPoint(&ip);
+            area(m.GetBdrAttribute(be) - 1) += ip.weight * T->Weight();
+         }
+      }
+      return area;
+   };
+   auto n_one_sided_faces = [](Mesh &m)
+   {
+      int n = 0;
+      for (int f = 0; f < m.GetNumFaces(); f++)
+      {
+         if (m.GetFaceInformation(f).IsBoundary()) { n++; }
+      }
+      return n;
+   };
+
+   const Vector original_area = bdr_area(mesh);
+
+   // uniform refinement, then local refinement of every third element, twice
+   mesh.UniformRefinement();
+   for (int r = 0; r < 2; r++)
+   {
+      Array<int> refs;
+      for (int i = 0; i < mesh.GetNE(); i += 3) { refs.Append(i); }
+      mesh.GeneralRefinement(refs, 1);
+   }
+
+   const Vector area = bdr_area(mesh);
+   for (int a = 0; a < nattr; a++)
+   {
+      CAPTURE(mesh_fname, a + 1);
+      REQUIRE(area(a) == MFEM_Approx(original_area(a)));
+   }
+   REQUIRE(n_one_sided_faces(mesh) == mesh.GetNBE());
+} // test case
+
+
 #ifdef MFEM_USE_MPI
+
+// Test case: Verify that rebalancing a ParMesh with refined pyramids transfers
+//            all children of the pyramids (ten, not eight): the number of
+//            elements and the volume are preserved, and the interpolation of a
+//            polynomial into an H1 space stays exact.
+TEST_CASE("ParNCMesh Pyramid Rebalance", "[Parallel], [NCMesh]")
+{
+   Mesh smesh("../../data/fichera-mixed-16.mesh", 1, 1);
+   smesh.EnsureNCMesh(true);
+   ParMesh pmesh(MPI_COMM_WORLD, smesh);
+   smesh.Clear();
+
+   auto volume = [](ParMesh &m)
+   {
+      real_t vol = 0.0;
+      for (int e = 0; e < m.GetNE(); e++) { vol += m.GetElementVolume(e); }
+      MPI_Allreduce(MPI_IN_PLACE, &vol, 1, MPITypeMap<real_t>::mpi_type,
+                    MPI_SUM, m.GetComm());
+      return vol;
+   };
+   const real_t original_volume = volume(pmesh);
+
+   pmesh.UniformRefinement();
+   for (int r = 0; r < 2; r++)
+   {
+      Array<int> refs;
+      for (int i = 0; i < pmesh.GetNE(); i += 3) { refs.Append(i); }
+      pmesh.GeneralRefinement(refs, 1);
+
+      const long long ne = pmesh.GetGlobalNE();
+      pmesh.Rebalance();
+      REQUIRE(pmesh.GetGlobalNE() == ne);
+      REQUIRE(volume(pmesh) == MFEM_Approx(original_volume));
+   }
+
+   H1_FECollection fec(2, 3);
+   ParFiniteElementSpace fes(&pmesh, &fec);
+   FunctionCoefficient u([](const Vector &x)
+   {
+      return std::pow(1.0 + 0.3 * x(0) + 0.5 * x(1) + 0.7 * x(2), 2);
+   });
+   ParGridFunction x(&fes);
+   x.ProjectCoefficient(u);
+   REQUIRE(x.ComputeL2Error(u) == MFEM_Approx(0.0));
+} // test case
 
 // Test case: Verify that a conforming mesh yields the same norm for the
 //            assembled diagonal with PA when using the standard (conforming)

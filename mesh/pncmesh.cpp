@@ -815,7 +815,7 @@ bool ParNCMesh::CheckElementType(int elem, int type)
    }
    else
    {
-      for (int i = 0; i < 8 && el.child[i] >= 0; i++)
+      for (int i = 0; i < MaxElemChildren && el.child[i] >= 0; i++)
       {
          if (!CheckElementType(el.child[i], type)) { return false; }
       }
@@ -1488,11 +1488,11 @@ bool ParNCMesh::PruneTree(int elem)
    Element &el = elements[elem];
    if (el.ref_type)
    {
-      bool remove[8];
+      bool remove[MaxElemChildren];
       bool removeAll = true;
 
       // determine which subtrees can be removed (and whether it's all of them)
-      for (int i = 0; i < 8; i++)
+      for (int i = 0; i < MaxElemChildren; i++)
       {
          remove[i] = false;
          if (el.child[i] >= 0)
@@ -1506,7 +1506,7 @@ bool ParNCMesh::PruneTree(int elem)
       if (removeAll) { return true; }
 
       // not all children can be removed, but remove those that can be
-      for (int i = 0; i < 8; i++)
+      for (int i = 0; i < MaxElemChildren; i++)
       {
          if (remove[i]) { DerefineElement(el.child[i]); }
       }
@@ -2398,9 +2398,9 @@ void ParNCMesh::SynchronizeDerefinementData(Array<Type> &elem_data,
    {
       const int* fine = deref_table.GetRow(i);
       int size = deref_table.RowSize(i);
-      MFEM_ASSERT(size <= 8, "");
+      MFEM_ASSERT(size <= MaxElemChildren, "");
 
-      int ranks[8], min_rank = INT_MAX, max_rank = INT_MIN;
+      int ranks[MaxElemChildren], min_rank = INT_MAX, max_rank = INT_MIN;
       for (int j = 0; j < size; j++)
       {
          ranks[j] = elements[leaf_elements[fine[j]]].rank;
@@ -2980,16 +2980,19 @@ void ParNCMesh::ElementSet::FlagElements(const Array<int> &elements, char flag)
 void ParNCMesh::ElementSet::EncodeTree(int elem)
 {
    Element &el = ncmesh->elements[elem];
+   // refined pyramids have 10 children: their child mask takes two bytes
+   const bool two_bytes = (el.Geom() == Geometry::PYRAMID);
    if (!el.ref_type)
    {
       // we reached a leaf, mark this as zero child mask
       data.Append(0);
+      if (two_bytes) { data.Append(0); }
    }
    else
    {
       // check which subtrees contain marked elements
       int mask = 0;
-      for (int i = 0; i < 8; i++)
+      for (int i = 0; i < MaxElemChildren; i++)
       {
          if (el.child[i] >= 0 && ncmesh->elements[el.child[i]].flag)
          {
@@ -2998,13 +3001,15 @@ void ParNCMesh::ElementSet::EncodeTree(int elem)
       }
 
       // write the bit mask and visit the subtrees
-      data.Append(mask);
+      MFEM_ASSERT(two_bytes || mask < 256, "child mask does not fit");
+      data.Append(mask & 0xff);
+      if (two_bytes) { data.Append(mask >> 8); }
       if (include_ref_types)
       {
          data.Append(el.ref_type);
       }
 
-      for (int i = 0; i < 8; i++)
+      for (int i = 0; i < MaxElemChildren; i++)
       {
          if (mask & (1 << i))
          {
@@ -3059,14 +3064,15 @@ void ParNCMesh::ElementSet::DecodeTree(int elem, int &pos,
 #ifdef MFEM_DEBUG
    ref_path.Append(elem);
 #endif
+   Element &el = ncmesh->elements[elem];
    int mask = data[pos++];
+   if (el.Geom() == Geometry::PYRAMID) { mask |= data[pos++] << 8; }
    if (!mask)
    {
       elements.Append(elem);
    }
    else
    {
-      Element &el = ncmesh->elements[elem];
       if (include_ref_types)
       {
          int ref_type = data[pos++];
@@ -3082,7 +3088,7 @@ void ParNCMesh::ElementSet::DecodeTree(int elem, int &pos,
                      << RefPath() << "     mask = " << mask);
       }
 
-      for (int i = 0; i < 8; i++)
+      for (int i = 0; i < MaxElemChildren; i++)
       {
          if (mask & (1 << i))
          {
