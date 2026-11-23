@@ -2473,9 +2473,9 @@ void ParNCMesh::SynchronizeDerefinementData(Array<Type> &elem_data,
    {
       const int* fine = deref_table.GetRow(i);
       int size = deref_table.RowSize(i);
-      MFEM_ASSERT(size <= 8, "");
+      MFEM_ASSERT(size <= MaxElemChildren, "");
 
-      int ranks[8], min_rank = INT_MAX, max_rank = INT_MIN;
+      int ranks[MaxElemChildren], min_rank = INT_MAX, max_rank = INT_MIN;
       for (int j = 0; j < size; j++)
       {
          ranks[j] = elements[leaf_elements[fine[j]]].rank;
