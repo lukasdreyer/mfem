@@ -1799,17 +1799,18 @@ void NCMesh::RefineElement(const Refinement & ref)
       child[5] = NewPyramid(mid04, mid14, mid24, mid34, no[4],
                             attr, -1, fa[1], fa[2], fa[3], fa[4]);
 
+      // the faces of a tetrahedron are numbered by the opposite vertex
       child[6] = NewTetrahedron(mid01, midf0, mid04, mid14,
-                                attr, -1, -1, -1, fa[1]);
+                                attr, -1, fa[1], -1, -1);
 
       child[7] = NewTetrahedron(midf0, mid14, mid12, mid24,
-                                attr, -1, -1, fa[2], -1);
+                                attr, fa[2], -1, -1, -1);
 
       child[8] = NewTetrahedron(midf0, mid23, mid34, mid24,
-                                attr, -1, -1, fa[3], -1);
+                                attr, fa[3], -1, -1, -1);
 
       child[9] = NewTetrahedron(mid03, mid04, midf0, mid34,
-                                attr, -1, fa[4], -1, -1);
+                                attr, -1, -1, fa[4], -1);
 
       CheckIsoFace(no[3], no[2], no[1], no[0], mid23, mid12, mid01, mid03, midf0);
    }
