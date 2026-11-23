@@ -263,6 +263,11 @@ void NCMesh::InitGeomFlags()
    {
       Geoms |= (1 << elements[i].Geom());
    }
+   // refined pyramids have tetrahedral children
+   if (Geoms & (1 << Geometry::PYRAMID))
+   {
+      Geoms |= (1 << Geometry::TETRAHEDRON);
+   }
 }
 
 void NCMesh::Update()
