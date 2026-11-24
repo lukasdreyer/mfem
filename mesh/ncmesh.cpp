@@ -4528,6 +4528,49 @@ void NCMesh::FindVertexCousins(int elem, int local, Array<int> &cousins) const
 {
    const Element &el = elements[elem];
 
+   // The search by reference coordinates needs the refinement transforms of
+   // all geometries in the tree, which exist only for triangles, quadrilaterals,
+   // hexahedra and prisms. Trees of tetrahedra or pyramids (whose children
+   // include tetrahedra) are searched topologically: all leaves of the root
+   // tree that contain the vertex.
+   const int ntrf = sizeof(geom_parent) / sizeof(geom_parent[0]);
+   bool have_trf = true;
+   int tree_root = elem;
+   for (int e = elem; e >= 0; e = elements[e].parent)
+   {
+      const int g = elements[e].Geom();
+      if (g >= ntrf || !geom_parent[g] || !geom_corners[g]) { have_trf = false; }
+      tree_root = e;
+   }
+   if (!have_trf)
+   {
+      const int node = el.node[local];
+      cousins.SetSize(0);
+      Array<int> stack;
+      stack.Append(tree_root);
+      while (stack.Size())
+      {
+         const Element &e = elements[stack.Last()];
+         const int index = stack.Last();
+         stack.DeleteLast();
+         if (!e.ref_type)
+         {
+            for (int i = 0; i < GI[e.Geom()].nv; i++)
+            {
+               if (e.node[i] == node) { cousins.Append(index); break; }
+            }
+         }
+         else
+         {
+            for (int ch = 0; ch < MaxElemChildren && e.child[ch] >= 0; ch++)
+            {
+               stack.Append(e.child[ch]);
+            }
+         }
+      }
+      return;
+   }
+
    RefCoord coord[3];
    MFEM_ASSERT(geom_corners[el.Geom()], "unsupported geometry");
    std::memcpy(coord, geom_corners[el.Geom()][local], sizeof(coord));
