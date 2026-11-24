@@ -3355,4 +3355,150 @@ TEST_CASE("NCMesh high vertex reference count", "[NCMesh]")
    REQUIRE(mesh.GetNE() == 8 * K);
 }
 
+namespace
+{
+
+// Solves -Delta u = f with Dirichlet conditions on the whole boundary for a
+// polynomial u of the given degree (>= 2) and returns the L2 error, which
+// vanishes up to round-off if the nonconforming H1 space is conforming.
+real_t PolynomialPoissonError(Mesh &mesh, int order)
+{
+   auto l1 = [](const Vector &x) { return x(0) + 0.5*x(1) + 0.3*x(2) + 0.2; };
+   auto l2 = [](const Vector &x) { return 0.4*x(0) - x(1) + 0.6*x(2); };
+   FunctionCoefficient u([&](const Vector &x)
+   {
+      return std::pow(l1(x), order) + std::pow(l2(x), order);
+   });
+   FunctionCoefficient f([&](const Vector &x)
+   {
+      return -order*(order-1)*(1.34*std::pow(l1(x), order-2) +
+                               1.52*std::pow(l2(x), order-2));
+   });
+
+   H1_FECollection fec(order, mesh.Dimension());
+   FiniteElementSpace fes(&mesh, &fec);
+   Array<int> ess_bdr(mesh.bdr_attributes.Max()), ess_tdof;
+   ess_bdr = 1;
+   fes.GetEssentialTrueDofs(ess_bdr, ess_tdof);
+
+   GridFunction x(&fes);
+   x = 0.0;
+   x.ProjectBdrCoefficient(u, ess_bdr);
+   LinearForm b(&fes);
+   b.AddDomainIntegrator(new DomainLFIntegrator(f));
+   b.Assemble();
+   BilinearForm a(&fes);
+   a.AddDomainIntegrator(new DiffusionIntegrator);
+   a.Assemble();
+
+   OperatorPtr A;
+   Vector B, X;
+   a.FormLinearSystem(ess_tdof, x, b, A, X, B);
+   GSSmoother M(*A.As<SparseMatrix>());
+   PCG(*A, M, B, X, 0, 5000, 1e-24, 0.0); // squared tolerances
+   a.RecoverFEMSolution(X, b, x);
+   return x.ComputeL2Error(u);
+}
+
+real_t PseudoRandom(const Vector &c)
+{
+   const real_t s = std::sin(12.9898 * c(0) + 78.233 * c(1) +
+                             37.719 * c(2)) * 43758.5453;
+   return s - std::floor(s);
+}
+
+} // namespace
+
+// Test case: Verify edge-face constraints with unlimited nonconforming level
+//            difference: an edge of a prism, tetrahedron or pyramid can lie in
+//            a quadrilateral master face without being an edge of any of its
+//            slave faces, also when it is only a part of the line that splits
+//            a (sub)face of the master face. Poisson with a polynomial exact
+//            solution must then be solved exactly.
+TEST_CASE("NCMesh Hidden Edge Constraints", "[NCMesh]")
+{
+   SECTION("Prisms")
+   {
+      Mesh mesh("../../data/beam-wedge.mesh", 1, 1);
+      mesh.UniformRefinement();
+      mesh.EnsureNCMesh(true);
+      for (int cycle = 0; cycle < 4; cycle++)
+      {
+         Array<int> refs;
+         Vector c(3);
+         for (int e = 0; e < mesh.GetNE(); e++)
+         {
+            mesh.GetElementCenter(e, c);
+            if (PseudoRandom(c) < 0.3) { refs.Append(e); }
+         }
+         mesh.GeneralRefinement(refs, 1, 0);
+      }
+      const real_t error = PolynomialPoissonError(mesh, 2);
+      CAPTURE(mesh.GetNE(), error);
+      CHECK(error < 1e-10);
+   }
+
+   SECTION("Pyramid on a quadrilateral face")
+   {
+      // a pyramid in x > 0 with its base on the plane x = 0, glued to a
+      // hexahedron or to two prisms in x < 0; the descendants of the pyramid
+      // with a face in the plane are refined repeatedly
+      const bool prisms = GENERATE(false, true);
+      CAPTURE(prisms);
+
+      const real_t v[9][3] =
+      {
+         {0,0,0}, {0,1,0}, {0,1,1}, {0,0,1},
+         {-1,0,0}, {-1,1,0}, {-1,1,1}, {-1,0,1}, {1,0.5,0.5}
+      };
+      Mesh mesh(3, 9, prisms ? 3 : 2, 0, 3);
+      for (int i = 0; i < 9; i++) { mesh.AddVertex(v[i]); }
+      if (prisms)
+      {
+         const int w1[6] = {0, 1, 4, 3, 2, 7}, w2[6] = {1, 5, 4, 2, 6, 7};
+         mesh.AddWedge(w1, 1);
+         mesh.AddWedge(w2, 1);
+      }
+      else
+      {
+         const int hex[8] = {4, 0, 1, 5, 7, 3, 2, 6};
+         mesh.AddHex(hex, 1);
+      }
+      const int pyr[5] = {0, 1, 2, 3, 8};
+      mesh.AddPyramid(pyr, 2);
+      mesh.FinalizeTopology();
+      mesh.Finalize(true, true);
+      mesh.EnsureNCMesh(true);
+
+      for (int cycle = 0; cycle < 3; cycle++)
+      {
+         Array<int> refs;
+         Vector c(3);
+         for (int e = 0; e < mesh.GetNE(); e++)
+         {
+            mesh.GetElementCenter(e, c);
+            if (c(0) < 0.0) { continue; }
+            Array<int> faces, ori;
+            mesh.GetElementFaces(e, faces, ori);
+            for (int fc : faces)
+            {
+               Array<int> fv;
+               mesh.GetFaceVertices(fc, fv);
+               bool in_plane = true;
+               for (int vtx : fv)
+               {
+                  if (std::abs(mesh.GetVertex(vtx)[0]) > 1e-12) { in_plane = false; }
+               }
+               if (in_plane) { refs.Append(e); break; }
+            }
+         }
+         mesh.GeneralRefinement(refs, 1, 0);
+      }
+      const real_t error = PolynomialPoissonError(mesh, 2);
+      CAPTURE(mesh.GetNE(), error);
+      CHECK(error < 1e-10);
+   }
+} // test case
+
+
 } // namespace mfem
