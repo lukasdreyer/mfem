@@ -368,6 +368,98 @@ TEST_CASE("ParNCMesh Pyramid Rebalance", "[Parallel], [NCMesh]")
    REQUIRE(x.ComputeL2Error(u) == MFEM_Approx(0.0));
 } // test case
 
+// Test case: Verify H1 spaces on parallel nonconforming meshes with pyramids
+//            after refinement, rebalancing and derefinement (ghost layers of
+//            pyramids with tetrahedral children, ten children per pyramid):
+//            Poisson with a quadratic exact solution must be solved exactly.
+TEST_CASE("ParNCMesh Pyramid Poisson", "[Parallel], [NCMesh]")
+{
+   Mesh smesh("../../data/fichera-mixed-16.mesh", 1, 1);
+   smesh.EnsureNCMesh(true);
+   ParMesh pmesh(MPI_COMM_WORLD, smesh);
+   smesh.Clear();
+
+   auto l1 = [](const Vector &x) { return x(0) + 0.5*x(1) + 0.3*x(2) + 0.2; };
+   auto l2 = [](const Vector &x) { return 0.4*x(0) - x(1) + 0.6*x(2); };
+   FunctionCoefficient u([&](const Vector &x)
+   {
+      return std::pow(l1(x), 2) + std::pow(l2(x), 2);
+   });
+   ConstantCoefficient f(-2.0*(1.34 + 1.52));
+
+   auto poisson_error = [&]()
+   {
+      H1_FECollection fec(2, 3);
+      ParFiniteElementSpace fes(&pmesh, &fec);
+      Array<int> ess_bdr(pmesh.bdr_attributes.Max()), ess_tdof;
+      ess_bdr = 1;
+      fes.GetEssentialTrueDofs(ess_bdr, ess_tdof);
+
+      ParGridFunction x(&fes);
+      x = 0.0;
+      x.ProjectBdrCoefficient(u, ess_bdr);
+      ParLinearForm b(&fes);
+      b.AddDomainIntegrator(new DomainLFIntegrator(f));
+      b.Assemble();
+      ParBilinearForm a(&fes);
+      a.AddDomainIntegrator(new DiffusionIntegrator);
+      a.Assemble();
+
+      OperatorPtr A;
+      Vector B, X;
+      a.FormLinearSystem(ess_tdof, x, b, A, X, B);
+      HypreSmoother M(*A.As<HypreParMatrix>(), HypreSmoother::Jacobi);
+      CGSolver cg(MPI_COMM_WORLD);
+      cg.SetRelTol(1e-14);
+      cg.SetMaxIter(5000);
+      cg.SetOperator(*A);
+      cg.SetPreconditioner(M);
+      cg.Mult(B, X);
+      a.RecoverFEMSolution(X, b, x);
+      return x.ComputeL2Error(u);
+   };
+
+   auto pseudo_random = [](const Vector &c)
+   {
+      const real_t s = std::sin(12.9898 * c(0) + 78.233 * c(1) +
+                                37.719 * c(2)) * 43758.5453;
+      return s - std::floor(s);
+   };
+
+   Vector c(3);
+   for (int cycle = 0; cycle < 3; cycle++)
+   {
+      Array<int> refs;
+      for (int e = 0; e < pmesh.GetNE(); e++)
+      {
+         pmesh.GetElementCenter(e, c);
+         if (pseudo_random(c) < 0.5) { refs.Append(e); }
+      }
+      pmesh.GeneralRefinement(refs, 1, 1);
+      pmesh.Rebalance();
+
+      const real_t error = poisson_error();
+      CAPTURE(cycle, pmesh.GetGlobalNE(), error);
+      CHECK(error < 1e-10);
+   }
+
+   // derefine where all children have x < 0
+   Vector elem_error(pmesh.GetNE());
+   for (int e = 0; e < pmesh.GetNE(); e++)
+   {
+      pmesh.GetElementCenter(e, c);
+      elem_error(e) = c(0);
+   }
+   const long long ne = pmesh.GetGlobalNE();
+   pmesh.DerefineByError(elem_error, 0.0, 1, 2);
+   REQUIRE(pmesh.GetGlobalNE() < ne);
+   pmesh.Rebalance();
+
+   const real_t error = poisson_error();
+   CAPTURE(pmesh.GetGlobalNE(), error);
+   CHECK(error < 1e-10);
+} // test case
+
 // Test case: Verify that a conforming mesh yields the same norm for the
 //            assembled diagonal with PA when using the standard (conforming)
 //            Mesh vs. the corresponding (non-conforming) NCMesh. (note:
