@@ -1050,6 +1050,11 @@ protected:
    void TraverseQuadFace(int vn0, int vn1, int vn2, int vn3,
                          const PointMatrix& pm, int level, Face* eface[4],
                          MatrixMap &matrix_map);
+   void TraverseQuadFaceEdge(int vn0, int vn1, const Point &p0,
+                             const Point &p1, int slaves_begin,
+                             MatrixMap &matrix_map);
+   bool IsSlaveFaceEdge(int vn0, int vn1, int slaves_begin) const;
+   MeshId FindHiddenEdge(int vn0, int vn1, int slaves_begin) const;
    struct TriFaceTraverseResults
    {
       bool unsplit; ///< Whether this face has no further splits.

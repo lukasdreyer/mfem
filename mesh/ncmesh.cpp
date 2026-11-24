@@ -3465,6 +3465,7 @@ void NCMesh::TraverseQuadFace(int vn0, int vn1, int vn2, int vn3,
    }
 
    // we need to recurse deeper
+   const int slaves_begin = face_list.slaves.Size();
    int mid[5];
    real_t scale;
    const int split = QuadFaceSplitType(vn0, vn1, vn2, vn3, scale, mid);
@@ -3503,56 +3504,121 @@ void NCMesh::TraverseQuadFace(int vn0, int vn1, int vn2, int vn3,
       eface[1] = eface[3] = NULL;
    }
 
-   // check for a prism edge constrained by the master face
-   if (HavePrisms() && mid[4] >= 0)
+   // check for edges of prisms, tetrahedra or pyramids that lie on the split
+   // line of this face but are not edges of its slave faces (edge-face
+   // constraints); they can be a part of the split line, which is therefore
+   // traversed recursively
+   if ((HavePrisms() || HaveTets() || HavePyramids()) && mid[4] >= 0)
    {
-      Node& enode = nodes[mid[4]];
-      if (enode.HasEdge())
+      if (split == 1)
       {
-         // process the edge only if it's not shared by slave faces within this
-         // master face (i.e. the edge is "hidden")
-         const int fi[3][2] = {{0, 0}, {1, 3}, {2, 0}};
-         if (!ef[0][fi[split][0]] && !ef[1][fi[split][1]])
+         TraverseQuadFaceEdge(mid[0], mid[2], Point(pm(0), pm(1), scale),
+                              Point(pm(3), pm(2), scale), slaves_begin,
+                              matrix_map);
+      }
+      else
+      {
+         TraverseQuadFaceEdge(mid[1], mid[3], Point(pm(1), pm(2), scale),
+                              Point(pm(0), pm(3), scale), slaves_begin,
+                              matrix_map);
+      }
+   }
+}
+
+bool NCMesh::IsSlaveFaceEdge(int vn0, int vn1, int slaves_begin) const
+{
+   for (int i = slaves_begin; i < face_list.slaves.Size(); i++)
+   {
+      const Slave &sl = face_list.slaves[i];
+      if (sl.index < 0) { continue; } // edge-face constraint
+
+      const Element &el = elements[sl.element];
+      const GeomInfo &gi = GI[el.Geom()];
+      const int *fv = gi.faces[sl.local];
+      const int nfv = gi.nfv[sl.local];
+      for (int j = 0; j < nfv; j++)
+      {
+         const int n0 = el.node[fv[j]], n1 = el.node[fv[(j+1) % nfv]];
+         if ((n0 == vn0 && n1 == vn1) || (n0 == vn1 && n1 == vn0))
          {
-            MFEM_ASSERT(enode.edge_refc == 1, "");
+            return true;
+         }
+      }
+   }
+   return false;
+}
 
-            MeshId buf[4];
-            Array<MeshId> eid(buf, 4);
+NCMesh::MeshId NCMesh::FindHiddenEdge(int vn0, int vn1,
+                                      int slaves_begin) const
+{
+   // the element with the edge is in the same tree as the slave faces that
+   // contain one of its vertices
+   Array<int> cousins;
+   for (int i = slaves_begin; i < face_list.slaves.Size(); i++)
+   {
+      const Slave &sl = face_list.slaves[i];
+      if (sl.index < 0) { continue; }
 
-            (split == 1) ? FindEdgeElements(mid[0], vn1, vn2, mid[2], eid)
-            /*        */ : FindEdgeElements(mid[3], vn0, vn1, mid[1], eid);
+      const Element &el = elements[sl.element];
+      for (int k = 0; k < GI[el.Geom()].nv; k++)
+      {
+         if (el.node[k] != vn0 && el.node[k] != vn1) { continue; }
 
-            MFEM_ASSERT(eid.Size() > 0, "edge prism not found");
-            MFEM_ASSERT(eid.Size() < 2, "non-unique edge prism");
-
-            // create a slave face record with a degenerate point matrix
-            face_list.slaves.Append(
-               Slave(FlipIndexSign(enode.edge_index),
-                     eid[0].element, eid[0].local, Geometry::SQUARE));
-            Slave &sl = face_list.slaves.Last();
-
-            if (split == 1)
+         FindVertexCousins(sl.element, k, cousins);
+         for (int c = 0; c < cousins.Size(); c++)
+         {
+            const int local =
+               find_element_edge(elements[cousins[c]], vn0, vn1, false);
+            if (local >= 0)
             {
-               Point mid0(pm(0), pm(1)), mid2(pm(2), pm(3));
-               int v1 = nodes[mid[0]].vert_index;
-               int v2 = nodes[mid[2]].vert_index;
-               sl.matrix =
-                  matrix_map.GetIndex(
-                     (v1 < v2) ? PointMatrix(mid0, mid2, mid2, mid0) :
-                     /*       */ PointMatrix(mid2, mid0, mid0, mid2));
-            }
-            else
-            {
-               Point mid1(pm(1), pm(2)), mid3(pm(3), pm(0));
-               int v1 = nodes[mid[1]].vert_index;
-               int v2 = nodes[mid[3]].vert_index;
-               sl.matrix =
-                  matrix_map.GetIndex(
-                     (v1 < v2) ? PointMatrix(mid1, mid3, mid3, mid1) :
-                     /*       */ PointMatrix(mid3, mid1, mid1, mid3));
+               return MeshId(-1, cousins[c], local, Geometry::SEGMENT);
             }
          }
       }
+   }
+   MFEM_ABORT("element of edge (" << vn0 << ", " << vn1 << ") not found");
+   return MeshId();
+}
+
+void NCMesh::TraverseQuadFaceEdge(int vn0, int vn1, const Point &p0,
+                                  const Point &p1, int slaves_begin,
+                                  MatrixMap &matrix_map)
+{
+   const int mid = FindMidEdgeNode(vn0, vn1);
+   if (mid < 0) { return; }
+
+   const Node &nd = nodes[mid];
+   if (nd.HasEdge())
+   {
+      // the edge exists; it needs a constraint by the master face unless it
+      // is an edge of a slave face. Parts of it are slaves of the edge, so
+      // there is no need to go deeper.
+      if (!IsSlaveFaceEdge(vn0, vn1, slaves_begin))
+      {
+         const MeshId eid = FindHiddenEdge(vn0, vn1, slaves_begin);
+
+         // create a slave face record with a degenerate point matrix
+         face_list.slaves.Append(
+            Slave(FlipIndexSign(nd.edge_index), eid.element, eid.local,
+                  Geometry::SQUARE));
+
+         const int v0index = nodes[vn0].vert_index;
+         const int v1index = nodes[vn1].vert_index;
+         face_list.slaves.Last().matrix =
+            matrix_map.GetIndex((v0index < v1index) ?
+                                PointMatrix(p0, p1, p1, p0) :
+                                PointMatrix(p1, p0, p0, p1));
+      }
+      return;
+   }
+
+   if (nd.HasVertex())
+   {
+      real_t s = nd.GetScale();
+      if (vn0 > vn1) { s = 1.0 - s; }
+      const Point pmid(p0, p1, s);
+      TraverseQuadFaceEdge(vn0, mid, p0, pmid, slaves_begin, matrix_map);
+      TraverseQuadFaceEdge(mid, vn1, pmid, p1, slaves_begin, matrix_map);
    }
 }
 
@@ -4097,8 +4163,9 @@ void NCMesh::CollectQuadFaceVertices(int v0, int v1, int v2, int v3,
          CollectQuadFaceVertices(v0, mid[0], mid[2], v3, indices);
          CollectQuadFaceVertices(mid[0], v1, v2, mid[2], indices);
 
-         if (HavePrisms()) // possible edge-face contact
+         if (HavePrisms() || HaveTets() || HavePyramids())
          {
+            // possible edge-face contact
             CollectEdgeVertices(mid[0], mid[2], indices);
          }
          break;
@@ -4110,8 +4177,9 @@ void NCMesh::CollectQuadFaceVertices(int v0, int v1, int v2, int v3,
          CollectQuadFaceVertices(v0, v1, mid[1], mid[3], indices);
          CollectQuadFaceVertices(mid[3], mid[1], v2, v3, indices);
 
-         if (HavePrisms()) // possible edge-face contact
+         if (HavePrisms() || HaveTets() || HavePyramids())
          {
+            // possible edge-face contact
             CollectEdgeVertices(mid[1], mid[3], indices);
          }
          break;
